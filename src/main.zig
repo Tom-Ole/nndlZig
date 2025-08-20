@@ -314,8 +314,8 @@ pub fn main() !void {
 
     var profiler = utils.Profiler.init();
 
-    var hidden_layers = [_]usize{ 5, 3, 7 };
-    var activations_fns = [_]ActivationFunction{ af.TANH, af.TANH, af.TANH, af.TANH };
+    var hidden_layers = [_]usize{ 6, 3, 6, 9 };
+    var activations_fns = [_]ActivationFunction{ af.LEAKY_RELU, af.TANH, af.SWISH, af.TANH, af.SIGMOID };
 
     // Architecture: 2 inputs → [2 hidden] → 1 output
     var mlp = try MLP.init(&alloc, 9, 9, hidden_layers[0..], activations_fns[0..]);
@@ -337,7 +337,7 @@ pub fn main() !void {
         .{ 0, 0, 0, 0, 1, 0, 0, 0, 0 },
     };
 
-    const epochs = 1_000_000;
+    const epochs = 100_000;
     const eta = 0.1; // learning rate
 
     // Train
@@ -370,6 +370,30 @@ pub fn main() !void {
 
         const max_out_idx = max_idx_list_float(f64, out);
         const max_target_idx = max_idx_list_float(f64, targets[idx][0..]);
+        std.debug.print("max_out_idx: {} \nmax_target_idx: {} \n \n", .{ max_out_idx, max_target_idx });
+    }
+
+    const test_inputs = [_][9]f64{
+        .{ 54, 12, 6, -1, 5, 5, 87, 23, 78 },
+        .{ -1, 31, -1235, 14636, 52, 74, 1, 0, 7 },
+    };
+    const test_targets = [_][9]f64{
+        .{ 0, 0, 0, 0, 0, 0, 1, 0, 0 },
+        .{ 0, 0, 0, 1, 0, 0, 0, 0, 0 },
+    };
+
+    std.debug.print("\n--- Test Output ---\n", .{});
+    for (test_inputs, 0..) |inp, idx| {
+        const out = mlp.compute(inp[0..]);
+        std.debug.print("Target: ", .{});
+        print_list_float(f64, test_targets[idx][0..]);
+        std.debug.print("\n", .{});
+        std.debug.print("Output: ", .{});
+        print_list_float(f64, out);
+        std.debug.print("\n", .{});
+
+        const max_out_idx = max_idx_list_float(f64, out);
+        const max_target_idx = max_idx_list_float(f64, test_targets[idx][0..]);
         std.debug.print("max_out_idx: {} \nmax_target_idx: {} \n \n", .{ max_out_idx, max_target_idx });
     }
 
