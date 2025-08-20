@@ -6,6 +6,7 @@ const std = @import("std");
 
 const ActivationFunction = struct {
     f: *const fn (f64) f64,
+    df: *const fn (f64) f64,
 };
 
 const Layer = struct {
@@ -16,6 +17,9 @@ const Layer = struct {
 
     weights: []f64, // weights table
     biases: []f64,
+
+    pre_output: []f64,
+    delta_error: []f64,
 
     activation_fn: ActivationFunction,
 
@@ -28,6 +32,8 @@ const Layer = struct {
             .inputs = try alloc.alloc(f64, input_size),
             .output = try alloc.alloc(f64, output_size),
             .weights = try alloc.alloc(f64, input_size * output_size),
+            .pre_output = try alloc.alloc(f64, output_size),
+            .delta_error = try alloc.alloc(f64, output_size),
             .biases = try alloc.alloc(f64, output_size),
             .activation_fn = activation_fn,
 
@@ -40,11 +46,18 @@ const Layer = struct {
         self.alloc.free(self.weights);
         self.alloc.free(self.biases);
         self.alloc.free(self.output);
+        self.alloc.free(self.pre_output);
+        self.alloc.free(self.delta_error);
     }
 
-    fn set_input(self: *Layer, input: []f64) void {
+    fn set_input(self: *Layer, input: []const f64) void {
         std.debug.assert(self.inputs.len == input.len);
         @memcpy(self.inputs, input);
+    }
+
+    fn rand_weights(self: *Layer, rng: std.Random) void {
+        for (self.weights) |*w| w.* = rng.float(f64) * 0.2 - 0.1;
+        for (self.biases) |*b| b.* = 0.0;
     }
 
     fn compute(self: *Layer) []f64 {
@@ -53,6 +66,7 @@ const Layer = struct {
             for (0..self.input_size) |i| {
                 sum += self.inputs[i] * self.weights[i * self.output_size + j];
             }
+            self.pre_output[j] = sum;
             self.output[j] = self.activation_fn.f(sum);
         }
 
@@ -72,6 +86,8 @@ const MLP = struct {
     layer_outputs: []usize,
     layers: []Layer,
     output: []f64,
+
+    ground_truth: []f64,
 
     alloc: *std.mem.Allocator,
 
@@ -97,6 +113,7 @@ const MLP = struct {
             .output_size = output_size,
             .layer_outputs = try alloc.dupe(usize, layer_outputs),
             .layers = layers,
+            .ground_truth = try alloc.alloc(f64, output_size),
             .output = try alloc.alloc(f64, output_size),
         };
     }
@@ -109,7 +126,15 @@ const MLP = struct {
         self.alloc.free(self.layers);
     }
 
-    fn compute(self: *MLP, inputs: []f64) []f64 {
+    fn rand_weights(self: *MLP) void {
+        var prng = std.Random.Xoshiro256.init(2893457);
+        const rand = prng.random();
+        for (self.layers) |*layer| {
+            layer.rand_weights(rand);
+        }
+    }
+
+    fn compute(self: *MLP, inputs: []const f64) []f64 {
         self.layers[0].set_input(inputs);
 
         for (self.layers, 0..) |*layer, i| {
@@ -122,6 +147,43 @@ const MLP = struct {
         return self.output;
     }
 
+    fn backprog(self: *MLP, eta: f64) void {
+        // const output_delta = self.alloc.alloc(f64, self.output_size);
+        const last_layer = &self.layers[self.layers.len - 1];
+        for (0..self.output_size) |j| {
+            last_layer.delta_error[j] = (self.output[j] - self.ground_truth[j]) * last_layer.activation_fn.df(last_layer.pre_output[j]);
+        }
+
+        // Output already calculatet;
+        // Input doesnt need to be affected;
+        var k: usize = self.layers.len - 2; // start at second-to-last
+        while (true) : (k -= 1) {
+            const current = &self.layers[k];
+            const next = &self.layers[k + 1];
+
+            for (0..current.output_size) |current_idx| {
+                var sum: f64 = 0;
+                for (0..next.output_size) |next_idx| {
+                    sum += next.delta_error[next_idx] * next.weights[current_idx * next.output_size + next_idx];
+                }
+                current.delta_error[current_idx] =
+                    sum * current.activation_fn.df(current.pre_output[current_idx]);
+            }
+
+            if (k == 0) break;
+        }
+
+        for (self.layers) |*layer| {
+            for (0..layer.output_size) |j| {
+                for (0..layer.input_size) |i| {
+                    const grad = layer.inputs[i] * layer.delta_error[j];
+                    layer.weights[i * layer.output_size + j] -= eta * grad;
+                }
+                layer.biases[j] -= eta * layer.delta_error[j];
+            }
+        }
+    }
+
     fn print(self: MLP) void {
         for (self.output) |output| {
             std.debug.print("{d}", .{output});
@@ -132,18 +194,37 @@ const MLP = struct {
 fn sigmoid(t: f64) f64 {
     return 0.5 * (1 + std.math.tanh(0.5 * t));
 }
+fn d_sigmoid(t: f64) f64 {
+    const s = sigmoid(t);
+    return s * (1 - s);
+}
 
 const SIGMOID: ActivationFunction = .{
     .f = sigmoid,
+    .df = d_sigmoid,
 };
 
 fn linear(x: f64) f64 {
     return x;
 }
 
+fn d_linear(_: f64) f64 {
+    return 1.0;
+}
+
 const LINEAR: ActivationFunction = .{
     .f = linear,
+    .df = d_linear,
 };
+
+fn mse(pred: []const f64, target: []const f64) f64 {
+    var sum: f64 = 0;
+    for (pred, 0..) |p, i| {
+        const diff = p - target[i];
+        sum += diff * diff;
+    }
+    return sum / @as(f64, @floatFromInt(pred.len));
+}
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -156,90 +237,45 @@ pub fn main() !void {
     var mlp = try MLP.init(&alloc, 2, 1, hidden_layers[0..], activations_fns[0..]);
     defer mlp.deinit();
 
-    var inputs = [_]f64{ 3.0, 1.2 };
+    mlp.rand_weights();
 
-    mlp.layers[0].weights[0] = 4.0; // x1 -> h1
-    mlp.layers[0].weights[1] = 2.9; // x2 -> h1
-    mlp.layers[0].biases[0] = -0.5; // bias of node h1
+    // XOR dataset
+    const inputs = [_][2]f64{
+        .{ 0, 0 },
+        .{ 0, 1 },
+        .{ 1, 0 },
+        .{ 1, 1 },
+    };
+    const targets = [_][1]f64{
+        .{0},
+        .{1},
+        .{1},
+        .{0},
+    };
 
-    mlp.layers[0].weights[2] = -1.0; // x1 -> h2
-    mlp.layers[0].weights[3] = 3.1; // x2 -> h2
-    mlp.layers[0].biases[1] = 1.11; // bias of h2
+    const epochs = 100_000;
+    const eta = 0.2; // learning rate
 
-    mlp.layers[1].weights[0] = 1.0; // h1 -> out
-    mlp.layers[1].weights[1] = 2.0; // h2 -> out
-    mlp.layers[1].biases[0] = -0.5;
+    // Train
+    for (0..epochs) |epoch| {
+        var epoch_loss: f64 = 0;
 
-    // Run forward pass
-    _ = mlp.compute(&inputs);
-    mlp.print();
-}
+        for (inputs, 0..) |inp, idx| {
+            const out = mlp.compute(inp[0..]); // forward pass
+            @memcpy(mlp.ground_truth, &targets[idx]);
+            mlp.backprog(eta);
+            epoch_loss += mse(out, &targets[idx]);
+        }
 
-//
-//
-//
-//  Tests
-//
-//
-//
+        if (epoch % 1000 == 0) {
+            std.debug.print("Epoch {d}, loss={d:.5}\n", .{ epoch, epoch_loss });
+        }
+    }
 
-test "simple Layer with SIGMOID" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    var alloc = gpa.allocator();
-
-    var layer: Layer = try Layer.init(
-        &alloc,
-        2,
-        1,
-        SIGMOID,
-    );
-    defer layer.deinit();
-
-    layer.inputs[0] = 1;
-    layer.inputs[1] = 0;
-
-    layer.weights[0] = 1;
-    layer.weights[1] = 1;
-
-    layer.biases[0] = -1.5;
-
-    // Sigmoid(-0.5)
-    const res = layer.compute();
-    try std.testing.expectApproxEqAbs(0.3775406687981454, res[0], 1e-9);
-}
-
-test "simple MLP with SIGMOID" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    var alloc = gpa.allocator();
-
-    var hidden_layers = [_]usize{2};
-    var activations_fns = [_]ActivationFunction{ SIGMOID, LINEAR };
-
-    // Architecture: 2 inputs → [2 hidden] → 1 output
-    var mlp = try MLP.init(&alloc, 2, 1, hidden_layers[0..], activations_fns[0..]);
-    defer mlp.deinit();
-
-    // Example input: (1, 0)
-    var inputs = [_]f64{ 1.0, 0.0 };
-
-    // First hidden layer: 2 neurons
-    // neuron0 = sigmoid(1*x1 + 1*x2 - 0.5)
-    mlp.layers[0].weights[0] = 1.0; // x1 -> h1
-    mlp.layers[0].weights[1] = 1.0; // x2 -> h1
-    mlp.layers[0].biases[0] = -0.5;
-
-    // neuron1 = sigmoid(1*x1 + 1*x2 - 1.5)
-    mlp.layers[0].weights[2] = 1.0; // x1 -> h2
-    mlp.layers[0].weights[3] = 1.0; // x2 -> h2
-    mlp.layers[0].biases[1] = -1.5;
-
-    // Output layer: 1 neuron
-    // sigmoid(h1*1 + h2*1 - 0.5)
-    mlp.layers[1].weights[0] = 1.0; // h1 -> out
-    mlp.layers[1].weights[1] = 1.0; // h2 -> out
-    mlp.layers[1].biases[0] = -0.5;
-
-    // Run forward pass
-    _ = mlp.compute(&inputs);
-    mlp.print();
+    std.debug.print("\n--- Testing ---\n", .{});
+    for (inputs, 0..) |inp, idx| {
+        const out = mlp.compute(inp[0..]);
+        const out_bin: u8 = if (out[0] > 0.95) 1 else 0;
+        std.debug.print("in={any} -> out={d} (raw {d:.3}, target {d})\n", .{ inp, out_bin, out[0], targets[idx][0] });
+    }
 }
